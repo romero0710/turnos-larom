@@ -1,0 +1,15 @@
+node_modules
+.next
+out
+build
+data
+.git
+.gitignore
+devlog.txt
+devlog.err.txt
+*.tsbuildinfo
+next-env.d.ts
+npm-debug.log*
+.DS_Store
+.env*
+.vercel
