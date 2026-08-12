@@ -314,6 +314,11 @@ function Agenda({ esBarbero }: { esBarbero: boolean }) {
                   <div className="flex items-baseline gap-2">
                     <span className="text-lg font-bold tabular-nums">{t.hora}</span>
                     <span className="text-sm text-zinc-400">→ {t.finHora}</span>
+                    {t.pendiente && (
+                      <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-700">
+                        pendiente
+                      </span>
+                    )}
                   </div>
                   <p className="mt-0.5 truncate font-medium text-zinc-900">
                     {t.clienteNombre}

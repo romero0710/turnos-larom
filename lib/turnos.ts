@@ -147,12 +147,15 @@ export function reservarTurno(datos: DatosReserva): ResultadoReserva {
 
     const token = randomBytes(16).toString("hex"); // 128 bits, imposible de adivinar
 
+    // Confirmación por WhatsApp (ladrillo 3a): activada salvo CONFIRMACION_TURNO=false.
+    const requiereConfirmacion = process.env.CONFIRMACION_TURNO !== "false" ? 1 : 0;
+
     db()
       .prepare(
         `INSERT INTO turnos
            (negocio_slug, servicio_id, barbero_id, fecha, inicio_min, fin_min,
-            cliente_nombre, cliente_telefono, token)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            cliente_nombre, cliente_telefono, token, requiere_confirmacion, confirmado)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
       )
       .run(
         negocio.slug,
@@ -164,6 +167,7 @@ export function reservarTurno(datos: DatosReserva): ResultadoReserva {
         nombre,
         telefono,
         token,
+        requiereConfirmacion,
       );
 
     return { ok: true, barberoId: elegido.id, barberoNombre: elegido.nombre, token };
@@ -282,6 +286,7 @@ export interface TurnoAgenda {
   clienteNombre: string;
   clienteTelefono: string;
   estado: "reservado" | "cancelado";
+  pendiente: boolean; // reservado pero todavía sin confirmar por WhatsApp
 }
 
 export interface AgendaDia {
@@ -299,6 +304,8 @@ interface FilaAgenda {
   cliente_nombre: string;
   cliente_telefono: string;
   estado: string;
+  requiere_confirmacion: number;
+  confirmado: number;
 }
 
 /**
@@ -310,9 +317,11 @@ export function agendaDelDia(fechaKey: string, barberoId?: string | null): Agend
   const filas = db()
     .prepare(
       `SELECT id, servicio_id, barbero_id, inicio_min, fin_min,
-              cliente_nombre, cliente_telefono, estado
+              cliente_nombre, cliente_telefono, estado,
+              requiere_confirmacion, confirmado
        FROM turnos
        WHERE negocio_slug = ? AND fecha = ?
+         AND estado IN ('reservado','cancelado')
          AND (? IS NULL OR barbero_id = ?)
        ORDER BY inicio_min ASC, id ASC`,
     )
@@ -321,6 +330,7 @@ export function agendaDelDia(fechaKey: string, barberoId?: string | null): Agend
   const turnos: TurnoAgenda[] = filas.map((f) => {
     const servicio = servicioPorId(f.servicio_id);
     const barbero = obtenerBarbero(f.barbero_id);
+    const estado = f.estado === "cancelado" ? "cancelado" : "reservado";
     return {
       id: f.id,
       hora: aTexto(f.inicio_min),
@@ -331,8 +341,9 @@ export function agendaDelDia(fechaKey: string, barberoId?: string | null): Agend
       barberoNombre: barbero?.nombre ?? f.barbero_id,
       clienteNombre: f.cliente_nombre,
       clienteTelefono: f.cliente_telefono,
-      estado: f.estado === "cancelado" ? "cancelado" : "reservado",
-    };
+      estado,
+      pendiente: estado === "reservado" && f.requiere_confirmacion === 1 && f.confirmado === 0,
+    } as TurnoAgenda;
   });
 
   const reservados = turnos.filter((t) => t.estado === "reservado");
@@ -429,7 +440,9 @@ export function metricasPeriodo(desdeKey: string, hastaKey: string): Metricas {
       turnosCancelados += 1;
       continue;
     }
-    // reservado
+    // Solo los reservados cuentan como ingreso. Los 'expirado' (turnos que no se
+    // confirmaron por WhatsApp) se ignoran: ni ingreso ni cancelación.
+    if (f.estado !== "reservado") continue;
     const precio = servicioPorId(f.servicio_id)?.precioArs ?? 0;
     turnosReservados += 1;
     ingresoEstimadoArs += precio;
@@ -467,4 +480,78 @@ export function resumenPeriodo(desdeKey: string, hastaKey: string): ResumenPerio
     ticketPromedioArs: m.ticketPromedioArs,
     tasaCancelacion: m.tasaCancelacion,
   };
+}
+
+// ============================================================================
+// Confirmación de turno por WhatsApp (Servicio 2, ladrillo 3a). El bot consume
+// estas funciones vía las rutas /api/bot/*.
+// ============================================================================
+
+export interface TurnoPendiente {
+  id: number;
+  nombre: string;
+  telefono: string;
+  servicioNombre: string;
+  barberoNombre: string;
+  fecha: string; // YYYY-MM-DD
+  inicioMin: number;
+  creadoEn: string; // 'YYYY-MM-DD HH:MM:SS' (UTC, de SQLite datetime('now'))
+}
+
+interface FilaPendiente {
+  id: number;
+  servicio_id: string;
+  barbero_id: string;
+  fecha: string;
+  inicio_min: number;
+  cliente_nombre: string;
+  cliente_telefono: string;
+  creado_en: string;
+}
+
+/** Turnos reservados que esperan confirmación por WhatsApp. */
+export function listarPendientes(): TurnoPendiente[] {
+  const filas = db()
+    .prepare(
+      `SELECT id, servicio_id, barbero_id, fecha, inicio_min,
+              cliente_nombre, cliente_telefono, creado_en
+       FROM turnos
+       WHERE negocio_slug = ? AND estado = 'reservado'
+         AND requiere_confirmacion = 1 AND confirmado = 0`,
+    )
+    .all(negocio.slug) as FilaPendiente[];
+
+  return filas.map((f) => ({
+    id: f.id,
+    nombre: f.cliente_nombre,
+    telefono: f.cliente_telefono,
+    servicioNombre: servicioPorId(f.servicio_id)?.nombre ?? f.servicio_id,
+    barberoNombre: obtenerBarbero(f.barbero_id)?.nombre ?? f.barbero_id,
+    fecha: f.fecha,
+    inicioMin: f.inicio_min,
+    creadoEn: f.creado_en,
+  }));
+}
+
+/** El cliente respondió SÍ. Devuelve true si había un pendiente para confirmar. */
+export function confirmarTurno(id: number): boolean {
+  const info = db()
+    .prepare(
+      `UPDATE turnos SET confirmado = 1
+       WHERE id = ? AND negocio_slug = ? AND estado = 'reservado'
+         AND requiere_confirmacion = 1 AND confirmado = 0`,
+    )
+    .run(id, negocio.slug);
+  return info.changes > 0;
+}
+
+/** Expira un turno pendiente (NO o timeout): libera el horario. estado='expirado'. */
+export function expirarTurno(id: number): boolean {
+  const info = db()
+    .prepare(
+      `UPDATE turnos SET estado = 'expirado'
+       WHERE id = ? AND negocio_slug = ? AND estado = 'reservado' AND confirmado = 0`,
+    )
+    .run(id, negocio.slug);
+  return info.changes > 0;
 }

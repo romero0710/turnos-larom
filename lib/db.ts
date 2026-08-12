@@ -129,6 +129,7 @@ function inicializarEsquema(database: Database.Database): void {
   `);
 
   migrarColumnaToken(database);
+  migrarColumnasConfirmacion(database);
 
   database.exec(`
     CREATE UNIQUE INDEX IF NOT EXISTS idx_turnos_token ON turnos (token);
@@ -142,5 +143,27 @@ function migrarColumnaToken(database: Database.Database): void {
     .all() as { name: string }[];
   if (!columnas.some((c) => c.name === "token")) {
     database.exec(`ALTER TABLE turnos ADD COLUMN token TEXT`);
+  }
+}
+
+/**
+ * Confirmación del turno por WhatsApp (Servicio 2, ladrillo 3a).
+ * - requiere_confirmacion: 1 si el turno se creó con confirmación activada.
+ * - confirmado: 1 cuando el cliente respondió SÍ por WhatsApp.
+ * Un turno sigue siendo estado='reservado' (ocupa el horario) mientras está
+ * pendiente; si expira o el cliente dice NO, pasa a estado='expirado' (libera
+ * el horario y NO cuenta como cancelación en métricas). Turnos viejos quedan
+ * con requiere_confirmacion=0 → no se los toca.
+ */
+function migrarColumnasConfirmacion(database: Database.Database): void {
+  const columnas = database
+    .prepare(`PRAGMA table_info(turnos)`)
+    .all() as { name: string }[];
+  const tiene = (n: string) => columnas.some((c) => c.name === n);
+  if (!tiene("requiere_confirmacion")) {
+    database.exec(`ALTER TABLE turnos ADD COLUMN requiere_confirmacion INTEGER NOT NULL DEFAULT 0`);
+  }
+  if (!tiene("confirmado")) {
+    database.exec(`ALTER TABLE turnos ADD COLUMN confirmado INTEGER NOT NULL DEFAULT 0`);
   }
 }
