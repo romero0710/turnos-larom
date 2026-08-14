@@ -33,6 +33,7 @@ export async function GET(req: Request) {
       hora: `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`,
       inicioEpochMs,
       creadoEnEpochMs,
+      token: t.token,
     };
   });
 

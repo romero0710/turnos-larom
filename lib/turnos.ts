@@ -496,6 +496,7 @@ export interface TurnoPendiente {
   fecha: string; // YYYY-MM-DD
   inicioMin: number;
   creadoEn: string; // 'YYYY-MM-DD HH:MM:SS' (UTC, de SQLite datetime('now'))
+  token: string; // para armar el link de ver/cancelar
 }
 
 interface FilaPendiente {
@@ -507,6 +508,7 @@ interface FilaPendiente {
   cliente_nombre: string;
   cliente_telefono: string;
   creado_en: string;
+  token: string;
 }
 
 /** Turnos reservados que esperan confirmación por WhatsApp. */
@@ -514,7 +516,7 @@ export function listarPendientes(): TurnoPendiente[] {
   const filas = db()
     .prepare(
       `SELECT id, servicio_id, barbero_id, fecha, inicio_min,
-              cliente_nombre, cliente_telefono, creado_en
+              cliente_nombre, cliente_telefono, creado_en, token
        FROM turnos
        WHERE negocio_slug = ? AND estado = 'reservado'
          AND requiere_confirmacion = 1 AND confirmado = 0`,
@@ -530,6 +532,7 @@ export function listarPendientes(): TurnoPendiente[] {
     fecha: f.fecha,
     inicioMin: f.inicio_min,
     creadoEn: f.creado_en,
+    token: f.token,
   }));
 }
 
