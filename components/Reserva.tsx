@@ -20,9 +20,10 @@ interface ReservaProps {
   servicios: Servicio[];
   barberos: Barbero[];
   barberosPorServicio: Record<string, string[]>; // servicioId -> ids de barberos que lo hacen
+  confirmacionWhatsApp?: boolean; // el turno se confirma por WhatsApp (SÍ o seña)
 }
 
-export default function Reserva({ servicios, barberos, barberosPorServicio }: ReservaProps) {
+export default function Reserva({ servicios, barberos, barberosPorServicio, confirmacionWhatsApp }: ReservaProps) {
   const [montado, setMontado] = useState(false);
   const [paso, setPaso] = useState<Paso>(1);
 
@@ -147,6 +148,19 @@ export default function Reserva({ servicios, barberos, barberosPorServicio }: Re
         </div>
         <h1 className="mt-6 text-2xl font-bold">¡Turno reservado!</h1>
         <p className="mt-2 text-zinc-500">Te esperamos, {nombre.split(" ")[0] || "crack"}.</p>
+
+        {confirmacionWhatsApp && (
+          <div className="mt-6 rounded-2xl border border-amber-300 bg-amber-50 p-5 text-left">
+            <p className="text-sm font-semibold text-amber-900">
+              📲 Revisá tu WhatsApp para confirmar
+            </p>
+            <p className="mt-1 text-sm text-amber-800">
+              Te enviamos un mensaje para dejar el turno confirmado. Seguí los pasos que te
+              indica; si no lo confirmás, el horario puede liberarse.
+            </p>
+          </div>
+        )}
+
         <div className="mt-8 rounded-2xl border border-zinc-200 p-6 text-left">
           <Fila etiqueta="Servicio" valor={`${servicio.nombre} · ${servicio.duracionMin} min`} />
           <Fila etiqueta="Precio" valor={formatearPrecio(servicio.precioArs)} />

@@ -16,5 +16,16 @@ export default function ReservarPage() {
     barberosPorServicio[s.id] = [...barberosParaServicio(s.id)];
   }
 
-  return <Reserva servicios={servicios} barberos={barberos} barberosPorServicio={barberosPorServicio} />;
+  // Si la confirmación por WhatsApp está activa, la pantalla de éxito avisa que
+  // hay que revisar el WhatsApp (mismo flag que usa la reserva).
+  const confirmacionWhatsApp = process.env.CONFIRMACION_TURNO !== "false";
+
+  return (
+    <Reserva
+      servicios={servicios}
+      barberos={barberos}
+      barberosPorServicio={barberosPorServicio}
+      confirmacionWhatsApp={confirmacionWhatsApp}
+    />
+  );
 }
