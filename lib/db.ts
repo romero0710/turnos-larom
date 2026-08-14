@@ -166,4 +166,8 @@ function migrarColumnasConfirmacion(database: Database.Database): void {
   if (!tiene("confirmado")) {
     database.exec(`ALTER TABLE turnos ADD COLUMN confirmado INTEGER NOT NULL DEFAULT 0`);
   }
+  // Monto de la seña pagada (ladrillo 3b). 0 = sin seña.
+  if (!tiene("sena_monto")) {
+    database.exec(`ALTER TABLE turnos ADD COLUMN sena_monto INTEGER NOT NULL DEFAULT 0`);
+  }
 }

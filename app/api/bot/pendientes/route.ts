@@ -34,6 +34,7 @@ export async function GET(req: Request) {
       inicioEpochMs,
       creadoEnEpochMs,
       token: t.token,
+      precioArs: t.precioArs,
     };
   });
 

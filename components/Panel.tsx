@@ -319,6 +319,11 @@ function Agenda({ esBarbero }: { esBarbero: boolean }) {
                         pendiente
                       </span>
                     )}
+                    {t.senaMonto > 0 && (
+                      <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-700">
+                        seña {formatearPrecio(t.senaMonto)}
+                      </span>
+                    )}
                   </div>
                   <p className="mt-0.5 truncate font-medium text-zinc-900">
                     {t.clienteNombre}

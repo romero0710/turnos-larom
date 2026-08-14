@@ -12,7 +12,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "no autorizado" }, { status: 401 });
   }
 
-  let body: { id?: number; accion?: string };
+  let body: { id?: number; accion?: string; senaMonto?: number };
   try {
     body = await req.json();
   } catch {
@@ -25,7 +25,8 @@ export async function POST(req: Request) {
   }
 
   if (body.accion === "confirmar") {
-    return NextResponse.json({ ok: confirmarTurno(id) });
+    const sena = Number(body.senaMonto) || 0;
+    return NextResponse.json({ ok: confirmarTurno(id, sena) });
   }
   if (body.accion === "expirar") {
     return NextResponse.json({ ok: expirarTurno(id) });

@@ -289,6 +289,7 @@ export interface TurnoAgenda {
   clienteTelefono: string;
   estado: "reservado" | "cancelado";
   pendiente: boolean; // reservado pero todavía sin confirmar por WhatsApp
+  senaMonto: number; // seña pagada (0 si no hubo)
 }
 
 export interface AgendaDia {
@@ -308,6 +309,7 @@ interface FilaAgenda {
   estado: string;
   requiere_confirmacion: number;
   confirmado: number;
+  sena_monto: number;
 }
 
 /**
@@ -320,7 +322,7 @@ export function agendaDelDia(fechaKey: string, barberoId?: string | null): Agend
     .prepare(
       `SELECT id, servicio_id, barbero_id, inicio_min, fin_min,
               cliente_nombre, cliente_telefono, estado,
-              requiere_confirmacion, confirmado
+              requiere_confirmacion, confirmado, sena_monto
        FROM turnos
        WHERE negocio_slug = ? AND fecha = ?
          AND estado IN ('reservado','cancelado')
@@ -345,6 +347,7 @@ export function agendaDelDia(fechaKey: string, barberoId?: string | null): Agend
       clienteTelefono: f.cliente_telefono,
       estado,
       pendiente: estado === "reservado" && f.requiere_confirmacion === 1 && f.confirmado === 0,
+      senaMonto: f.sena_monto ?? 0,
     } as TurnoAgenda;
   });
 
@@ -499,6 +502,7 @@ export interface TurnoPendiente {
   inicioMin: number;
   creadoEn: string; // 'YYYY-MM-DD HH:MM:SS' (UTC, de SQLite datetime('now'))
   token: string; // para armar el link de ver/cancelar
+  precioArs: number; // precio del servicio (para calcular la seña)
 }
 
 interface FilaPendiente {
@@ -525,28 +529,35 @@ export function listarPendientes(): TurnoPendiente[] {
     )
     .all(negocio.slug) as FilaPendiente[];
 
-  return filas.map((f) => ({
-    id: f.id,
-    nombre: f.cliente_nombre,
-    telefono: f.cliente_telefono,
-    servicioNombre: servicioPorId(f.servicio_id)?.nombre ?? f.servicio_id,
-    barberoNombre: obtenerBarbero(f.barbero_id)?.nombre ?? f.barbero_id,
-    fecha: f.fecha,
-    inicioMin: f.inicio_min,
-    creadoEn: f.creado_en,
-    token: f.token,
-  }));
+  return filas.map((f) => {
+    const servicio = servicioPorId(f.servicio_id);
+    return {
+      id: f.id,
+      nombre: f.cliente_nombre,
+      telefono: f.cliente_telefono,
+      servicioNombre: servicio?.nombre ?? f.servicio_id,
+      barberoNombre: obtenerBarbero(f.barbero_id)?.nombre ?? f.barbero_id,
+      fecha: f.fecha,
+      inicioMin: f.inicio_min,
+      creadoEn: f.creado_en,
+      token: f.token,
+      precioArs: servicio?.precioArs ?? 0,
+    };
+  });
 }
 
-/** El cliente respondió SÍ. Devuelve true si había un pendiente para confirmar. */
-export function confirmarTurno(id: number): boolean {
+/**
+ * El cliente confirmó (respondió SÍ, o pagó la seña). Devuelve true si había un
+ * pendiente. Si senaMonto > 0, además registra la seña pagada.
+ */
+export function confirmarTurno(id: number, senaMonto = 0): boolean {
   const info = db()
     .prepare(
-      `UPDATE turnos SET confirmado = 1
+      `UPDATE turnos SET confirmado = 1, sena_monto = ?
        WHERE id = ? AND negocio_slug = ? AND estado = 'reservado'
          AND requiere_confirmacion = 1 AND confirmado = 0`,
     )
-    .run(id, negocio.slug);
+    .run(Math.max(0, Math.round(senaMonto)), id, negocio.slug);
   return info.changes > 0;
 }
 
