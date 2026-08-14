@@ -180,7 +180,9 @@ export function reservarTurno(datos: DatosReserva): ResultadoReserva {
 // Ver / cancelar un turno por su token secreto (sin login).
 // ============================================================================
 
-const MIN_ANTELACION_CANCELAR = 2 * 60; // minutos: se puede cancelar hasta 2h antes
+// Minutos de antelación para cancelar gratis. Configurable por negocio con la
+// env CANCELACION_ANTELACION_MIN (default 120 = 2 horas antes del turno).
+const MIN_ANTELACION_CANCELAR = parseInt(process.env.CANCELACION_ANTELACION_MIN || "120", 10);
 
 interface FilaTurno {
   id: number;

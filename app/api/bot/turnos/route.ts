@@ -21,6 +21,7 @@ interface FilaProx {
   inicio_min: number;
   cliente_nombre: string;
   cliente_telefono: string;
+  token: string;
 }
 
 export async function GET(req: Request) {
@@ -37,7 +38,7 @@ export async function GET(req: Request) {
 
   const filas = db()
     .prepare(
-      `SELECT id, servicio_id, barbero_id, fecha, inicio_min, cliente_nombre, cliente_telefono
+      `SELECT id, servicio_id, barbero_id, fecha, inicio_min, cliente_nombre, cliente_telefono, token
        FROM turnos
        WHERE negocio_slug = ? AND estado = 'reservado'`,
     )
@@ -60,6 +61,7 @@ export async function GET(req: Request) {
       fecha: f.fecha,
       hora: `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`,
       inicioEpochMs,
+      token: f.token,
     });
   }
 
