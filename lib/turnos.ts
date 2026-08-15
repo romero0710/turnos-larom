@@ -202,6 +202,15 @@ function fechaHoraTurno(fecha: string, inicioMin: number): Date {
   return new Date(y, m - 1, d, h, min, 0, 0);
 }
 
+// Argentina UTC-3 fija (sin DST). Epoch real de un momento del turno,
+// independiente de la zona horaria del servidor (los contenedores suelen correr
+// en UTC). Se usa para saber si un turno ya terminó sin skew de 3 horas.
+const TZ_OFFSET_MIN = 180;
+function epochTurnoAr(fecha: string, min: number): number {
+  const [y, m, d] = fecha.split("-").map(Number);
+  return Date.UTC(y, m - 1, d, Math.floor(min / 60), min % 60) + TZ_OFFSET_MIN * 60_000;
+}
+
 export interface TurnoDetalle {
   servicioNombre: string;
   precioArs: number;
@@ -290,6 +299,8 @@ export interface TurnoAgenda {
   estado: "reservado" | "cancelado";
   pendiente: boolean; // reservado pero todavía sin confirmar por WhatsApp
   senaMonto: number; // seña pagada (0 si no hubo)
+  yaTermino: boolean; // el turno ya pasó (para habilitar la marca de asistencia)
+  asistio: number | null; // null = sin marcar (se asume que vino), 1 = vino, 0 = no vino
 }
 
 export interface AgendaDia {
@@ -310,6 +321,7 @@ interface FilaAgenda {
   requiere_confirmacion: number;
   confirmado: number;
   sena_monto: number;
+  asistio: number | null;
 }
 
 /**
@@ -322,7 +334,7 @@ export function agendaDelDia(fechaKey: string, barberoId?: string | null): Agend
     .prepare(
       `SELECT id, servicio_id, barbero_id, inicio_min, fin_min,
               cliente_nombre, cliente_telefono, estado,
-              requiere_confirmacion, confirmado, sena_monto
+              requiere_confirmacion, confirmado, sena_monto, asistio
        FROM turnos
        WHERE negocio_slug = ? AND fecha = ?
          AND estado IN ('reservado','cancelado')
@@ -331,10 +343,12 @@ export function agendaDelDia(fechaKey: string, barberoId?: string | null): Agend
     )
     .all(negocio.slug, fechaKey, barberoId ?? null, barberoId ?? null) as FilaAgenda[];
 
+  const ahora = Date.now();
   const turnos: TurnoAgenda[] = filas.map((f) => {
     const servicio = servicioPorId(f.servicio_id);
     const barbero = obtenerBarbero(f.barbero_id);
     const estado = f.estado === "cancelado" ? "cancelado" : "reservado";
+    const finEpoch = epochTurnoAr(fechaKey, f.fin_min);
     return {
       id: f.id,
       hora: aTexto(f.inicio_min),
@@ -348,6 +362,8 @@ export function agendaDelDia(fechaKey: string, barberoId?: string | null): Agend
       estado,
       pendiente: estado === "reservado" && f.requiere_confirmacion === 1 && f.confirmado === 0,
       senaMonto: f.sena_monto ?? 0,
+      yaTermino: finEpoch <= ahora,
+      asistio: f.asistio ?? null,
     } as TurnoAgenda;
   });
 
@@ -376,6 +392,28 @@ export function cancelarTurnoAdmin(id: number, barberoId?: string | null): boole
   return info.changes > 0;
 }
 
+/**
+ * Marca la asistencia real de un turno (Servicio 2, ladrillo 4): 1 = vino,
+ * 0 = no vino, null = sin marcar (default, se asume que asistió). Solo aplica a
+ * turnos reservados. Si se pasa barberoId, un barbero solo marca los suyos.
+ * Alimenta la fidelización (solo los asistidos suman) y el ingreso real (un
+ * no-show no factura el corte, solo la seña si la hubo).
+ */
+export function marcarAsistencia(
+  id: number,
+  asistio: 0 | 1 | null,
+  barberoId?: string | null,
+): boolean {
+  const info = db()
+    .prepare(
+      `UPDATE turnos SET asistio = ?
+       WHERE id = ? AND negocio_slug = ? AND estado = 'reservado'
+         AND (? IS NULL OR barbero_id = ?)`,
+    )
+    .run(asistio, id, negocio.slug, barberoId ?? null, barberoId ?? null);
+  return info.changes > 0;
+}
+
 // ============================================================================
 // Métricas del negocio (panel del dueño). Agrega los turnos de un rango de días
 // (claves YYYY-MM-DD, inclusive) en totales y rankings por barbero y por servicio.
@@ -399,6 +437,7 @@ export interface ResumenPeriodo {
 export interface Metricas {
   turnosReservados: number;
   turnosCancelados: number;
+  turnosNoVinieron: number; // reservados marcados "no vino" (no facturan el corte)
   ingresoEstimadoArs: number;
   ticketPromedioArs: number; // ingreso / reservados (0 si no hay)
   tasaCancelacion: number; // cancelados / (reservados + cancelados), 0..1
@@ -417,7 +456,7 @@ interface Acum {
 export function metricasPeriodo(desdeKey: string, hastaKey: string): Metricas {
   const filas = db()
     .prepare(
-      `SELECT servicio_id, barbero_id, estado
+      `SELECT servicio_id, barbero_id, estado, asistio, sena_monto
        FROM turnos
        WHERE negocio_slug = ? AND fecha >= ? AND fecha <= ?`,
     )
@@ -425,10 +464,13 @@ export function metricasPeriodo(desdeKey: string, hastaKey: string): Metricas {
     servicio_id: string;
     barbero_id: string;
     estado: string;
+    asistio: number | null;
+    sena_monto: number;
   }[];
 
   let turnosReservados = 0;
   let turnosCancelados = 0;
+  let turnosNoVinieron = 0;
   let ingresoEstimadoArs = 0;
   const porBarbero = new Map<string, Acum>();
   const porServicio = new Map<string, Acum>();
@@ -448,11 +490,17 @@ export function metricasPeriodo(desdeKey: string, hastaKey: string): Metricas {
     // Solo los reservados cuentan como ingreso. Los 'expirado' (turnos que no se
     // confirmaron por WhatsApp) se ignoran: ni ingreso ni cancelación.
     if (f.estado !== "reservado") continue;
+    // Un turno marcado "no vino" (asistio === 0) no factura el corte: solo entra
+    // la seña que se haya pagado (si la hubo). Sin marcar (null) o "vino" (1) =
+    // factura el precio completo.
+    const noVino = f.asistio === 0;
     const precio = servicioPorId(f.servicio_id)?.precioArs ?? 0;
+    const ingreso = noVino ? f.sena_monto ?? 0 : precio;
     turnosReservados += 1;
-    ingresoEstimadoArs += precio;
-    sumar(porBarbero, f.barbero_id, precio);
-    sumar(porServicio, f.servicio_id, precio);
+    if (noVino) turnosNoVinieron += 1;
+    ingresoEstimadoArs += ingreso;
+    sumar(porBarbero, f.barbero_id, ingreso);
+    sumar(porServicio, f.servicio_id, ingreso);
   }
 
   const aItems = (
@@ -468,6 +516,7 @@ export function metricasPeriodo(desdeKey: string, hastaKey: string): Metricas {
   return {
     turnosReservados,
     turnosCancelados,
+    turnosNoVinieron,
     ingresoEstimadoArs,
     ticketPromedioArs: turnosReservados > 0 ? Math.round(ingresoEstimadoArs / turnosReservados) : 0,
     tasaCancelacion: totalConEstado > 0 ? turnosCancelados / totalConEstado : 0,
@@ -570,4 +619,80 @@ export function expirarTurno(id: number): boolean {
     )
     .run(id, negocio.slug);
   return info.changes > 0;
+}
+
+// ============================================================================
+// Post-turno (Servicio 2, ladrillo 4): reseña de Google + fidelización.
+// El bot consume estas funciones vía /api/bot/postturno. Un turno "para reseña"
+// es uno reservado que ya terminó y NO fue marcado como no-show.
+// ============================================================================
+
+export interface TurnoResena {
+  id: number;
+  nombre: string;
+  telefono: string;
+  servicioNombre: string;
+  finEpochMs: number; // fin del turno (epoch real, AR UTC-3)
+  asistidos: number; // cortes asistidos de ese teléfono (incluye este) → fidelización
+}
+
+/**
+ * Cuenta los turnos asistidos de un teléfono: reservados, ya terminados y no
+ * marcados como "no vino". Es el contador de fidelización ("vas X/10"). Cuenta
+ * por el teléfono tal cual se cargó al reservar (limitación conocida: si el mismo
+ * cliente lo tipea distinto, se cuenta aparte).
+ */
+export function contarCortesAsistidos(telefono: string): number {
+  const filas = db()
+    .prepare(
+      `SELECT fecha, fin_min, asistio FROM turnos
+       WHERE negocio_slug = ? AND cliente_telefono = ? AND estado = 'reservado'`,
+    )
+    .all(negocio.slug, telefono) as { fecha: string; fin_min: number; asistio: number | null }[];
+  const ahora = Date.now();
+  return filas.filter((f) => f.asistio !== 0 && epochTurnoAr(f.fecha, f.fin_min) <= ahora).length;
+}
+
+/**
+ * Turnos que ya terminaron y son candidatos a mensaje post-turno (reseña +
+ * fidelización). El bot filtra por su ventana horaria y deduplica. Se acota a los
+ * últimos 2 días para no recorrer todo el historial.
+ */
+export function listarParaResena(): TurnoResena[] {
+  const ahora = Date.now();
+  const hace2Dias = new Date(ahora - 2 * 86_400_000);
+  const desdeKey = `${hace2Dias.getUTCFullYear()}-${String(hace2Dias.getUTCMonth() + 1).padStart(2, "0")}-${String(hace2Dias.getUTCDate()).padStart(2, "0")}`;
+
+  const filas = db()
+    .prepare(
+      `SELECT id, servicio_id, fecha, inicio_min, fin_min, cliente_nombre, cliente_telefono, asistio
+       FROM turnos
+       WHERE negocio_slug = ? AND estado = 'reservado' AND fecha >= ?`,
+    )
+    .all(negocio.slug, desdeKey) as {
+    id: number;
+    servicio_id: string;
+    fecha: string;
+    inicio_min: number;
+    fin_min: number;
+    cliente_nombre: string;
+    cliente_telefono: string;
+    asistio: number | null;
+  }[];
+
+  const out: TurnoResena[] = [];
+  for (const f of filas) {
+    if (f.asistio === 0) continue; // no-show: no se le pide reseña ni suma
+    const finEpochMs = epochTurnoAr(f.fecha, f.fin_min);
+    if (finEpochMs > ahora) continue; // todavía no terminó
+    out.push({
+      id: f.id,
+      nombre: f.cliente_nombre,
+      telefono: f.cliente_telefono,
+      servicioNombre: servicioPorId(f.servicio_id)?.nombre ?? f.servicio_id,
+      finEpochMs,
+      asistidos: contarCortesAsistidos(f.cliente_telefono),
+    });
+  }
+  return out;
 }

@@ -4,6 +4,7 @@ import { abrirSesion, cerrarSesion, identificar, leerSesion } from "@/lib/auth";
 import {
   agendaDelDia,
   cancelarTurnoAdmin,
+  marcarAsistencia,
   metricasPeriodo,
   resumenPeriodo,
   type AgendaDia,
@@ -42,6 +43,16 @@ export async function cancelarTurnoPanel(id: number): Promise<{ ok: boolean }> {
   const sesion = await leerSesion();
   if (!sesion) return { ok: false };
   return { ok: cancelarTurnoAdmin(id, filtroDe(sesion)) };
+}
+
+/** Marca si el cliente vino (1), no vino (0) o sin marcar (null). */
+export async function marcarAsistenciaPanel(
+  id: number,
+  asistio: 0 | 1 | null,
+): Promise<{ ok: boolean }> {
+  const sesion = await leerSesion();
+  if (!sesion) return { ok: false };
+  return { ok: marcarAsistencia(id, asistio, filtroDe(sesion)) };
 }
 
 /**

@@ -7,6 +7,7 @@ import { formatearPrecio } from "@/lib/disponibilidad";
 import {
   cancelarTurnoPanel,
   ingresarPanel,
+  marcarAsistenciaPanel,
   obtenerAgenda,
   obtenerMetricas,
   salirPanel,
@@ -238,6 +239,7 @@ function Agenda({ esBarbero }: { esBarbero: boolean }) {
   const [agenda, setAgenda] = useState<AgendaDia | null>(null);
   const [cargando, setCargando] = useState(true);
   const [cancelandoId, setCancelandoId] = useState<number | null>(null);
+  const [marcandoId, setMarcandoId] = useState<number | null>(null);
 
   const diaActual = dias[sel];
 
@@ -263,6 +265,16 @@ function Agenda({ esBarbero }: { esBarbero: boolean }) {
       else alert("No se pudo cancelar (puede que ya estuviera cancelado).");
     } finally {
       setCancelandoId(null);
+    }
+  }
+
+  async function onMarcar(id: number, asistio: 0 | 1 | null) {
+    setMarcandoId(id);
+    try {
+      const res = await marcarAsistenciaPanel(id, asistio);
+      if (res.ok) await cargar(diaActual.key);
+    } finally {
+      setMarcandoId(null);
     }
   }
 
@@ -324,6 +336,16 @@ function Agenda({ esBarbero }: { esBarbero: boolean }) {
                         seña {formatearPrecio(t.senaMonto)}
                       </span>
                     )}
+                    {t.asistio === 0 && (
+                      <span className="rounded-full bg-red-100 px-2 py-0.5 text-[11px] font-semibold text-red-700">
+                        no vino
+                      </span>
+                    )}
+                    {t.asistio === 1 && (
+                      <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-600">
+                        vino ✓
+                      </span>
+                    )}
                   </div>
                   <p className="mt-0.5 truncate font-medium text-zinc-900">
                     {t.clienteNombre}
@@ -338,13 +360,34 @@ function Agenda({ esBarbero }: { esBarbero: boolean }) {
                     </a>
                   </p>
                 </div>
-                <button
-                  onClick={() => onCancelar(t.id)}
-                  disabled={cancelandoId === t.id}
-                  className="ml-3 shrink-0 rounded-full border border-red-300 px-4 py-2 text-sm font-semibold text-red-700 transition-colors hover:bg-red-50 disabled:opacity-50"
-                >
-                  {cancelandoId === t.id ? "…" : "Cancelar"}
-                </button>
+                <div className="ml-3 flex shrink-0 flex-col items-end gap-2">
+                  <button
+                    onClick={() => onCancelar(t.id)}
+                    disabled={cancelandoId === t.id}
+                    className="rounded-full border border-red-300 px-4 py-2 text-sm font-semibold text-red-700 transition-colors hover:bg-red-50 disabled:opacity-50"
+                  >
+                    {cancelandoId === t.id ? "…" : "Cancelar"}
+                  </button>
+                  {/* Asistencia: solo tiene sentido marcarla en turnos ya pasados. */}
+                  {t.yaTermino &&
+                    (t.asistio === 0 ? (
+                      <button
+                        onClick={() => onMarcar(t.id, null)}
+                        disabled={marcandoId === t.id}
+                        className="rounded-full border border-zinc-300 px-4 py-1.5 text-xs font-semibold text-zinc-600 transition-colors hover:border-zinc-400 disabled:opacity-50"
+                      >
+                        {marcandoId === t.id ? "…" : "Deshacer"}
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => onMarcar(t.id, 0)}
+                        disabled={marcandoId === t.id}
+                        className="rounded-full border border-amber-300 px-4 py-1.5 text-xs font-semibold text-amber-700 transition-colors hover:bg-amber-50 disabled:opacity-50"
+                      >
+                        {marcandoId === t.id ? "…" : "No vino"}
+                      </button>
+                    ))}
+                </div>
               </li>
             ))}
           </ul>
@@ -503,6 +546,7 @@ function GestionMetricas() {
               tasaAnterior={datos.anterior?.tasaCancelacion}
               refAnterior={ETIQUETA_ANTERIOR[periodo]}
             />
+            <TarjetaNoVinieron cantidad={datos.turnosNoVinieron} />
           </div>
 
           <RankingMetrica titulo="Por barbero" items={datos.porBarbero} />
@@ -653,6 +697,22 @@ function TarjetaCancelaciones({
           mejorSiSube={false}
         />
       )}
+    </div>
+  );
+}
+
+/** Clientes que no vinieron (marcados desde la agenda). El ingreso ya los descuenta. */
+function TarjetaNoVinieron({ cantidad }: { cantidad: number }) {
+  const hay = cantidad > 0;
+  return (
+    <div className={`rounded-2xl border p-4 ${hay ? "border-red-200 bg-red-50" : "border-zinc-200"}`}>
+      <p className="text-xs uppercase tracking-wide text-zinc-400">No vinieron</p>
+      <p className={`mt-1 text-xl font-bold tabular-nums ${hay ? "text-red-700" : "text-zinc-900"}`}>
+        {cantidad}
+      </p>
+      <p className="mt-1.5 text-[11px] text-zinc-400">
+        {hay ? "No suman al ingreso ni a la fidelización" : "Todos los turnos, asistidos"}
+      </p>
     </div>
   );
 }

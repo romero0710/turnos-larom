@@ -130,6 +130,7 @@ function inicializarEsquema(database: Database.Database): void {
 
   migrarColumnaToken(database);
   migrarColumnasConfirmacion(database);
+  migrarColumnaAsistencia(database);
 
   database.exec(`
     CREATE UNIQUE INDEX IF NOT EXISTS idx_turnos_token ON turnos (token);
@@ -169,5 +170,21 @@ function migrarColumnasConfirmacion(database: Database.Database): void {
   // Monto de la seña pagada (ladrillo 3b). 0 = sin seña.
   if (!tiene("sena_monto")) {
     database.exec(`ALTER TABLE turnos ADD COLUMN sena_monto INTEGER NOT NULL DEFAULT 0`);
+  }
+}
+
+/**
+ * Asistencia real al turno (Servicio 2, ladrillo 4 — fidelización + reseñas).
+ * NULL = sin marcar (turno futuro, o pasado sin decisión → se asume que asistió,
+ * que es el caso mayoritario). 0 = "no vino" (no-show, no suma a fidelización).
+ * 1 = "vino" confirmado explícitamente por el barbero. La marca la pone el
+ * barbero en la agenda del panel sobre turnos ya pasados.
+ */
+function migrarColumnaAsistencia(database: Database.Database): void {
+  const columnas = database
+    .prepare(`PRAGMA table_info(turnos)`)
+    .all() as { name: string }[];
+  if (!columnas.some((c) => c.name === "asistio")) {
+    database.exec(`ALTER TABLE turnos ADD COLUMN asistio INTEGER`);
   }
 }
