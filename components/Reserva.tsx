@@ -115,6 +115,11 @@ export default function Reserva({ servicios, barberos, barberosPorServicio, conf
         telefono,
       });
       if (res.ok) {
+        // Con seña: vamos al checkout de MercadoPago (contador + "Ir a pagar").
+        if (res.pago) {
+          window.location.href = `/reservar/pago?token=${encodeURIComponent(res.token)}`;
+          return;
+        }
         setBarberoAsignado(res.barberoNombre);
         setTokenTurno(res.token);
         setConfirmado(true);
@@ -123,6 +128,8 @@ export default function Reserva({ servicios, barberos, barberosPorServicio, conf
         setHora(null);
         setPaso(4);
         void cargarHorarios();
+      } else if (res.error === "pago") {
+        setErrorReserva("No pudimos generar el pago de la seña. Probá de nuevo en un momento.");
       } else {
         setErrorReserva("No pudimos guardar el turno. Probá de nuevo en un momento.");
       }

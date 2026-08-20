@@ -131,6 +131,7 @@ function inicializarEsquema(database: Database.Database): void {
   migrarColumnaToken(database);
   migrarColumnasConfirmacion(database);
   migrarColumnaAsistencia(database);
+  migrarColumnasPago(database);
 
   database.exec(`
     CREATE UNIQUE INDEX IF NOT EXISTS idx_turnos_token ON turnos (token);
@@ -186,5 +187,33 @@ function migrarColumnaAsistencia(database: Database.Database): void {
     .all() as { name: string }[];
   if (!columnas.some((c) => c.name === "asistio")) {
     database.exec(`ALTER TABLE turnos ADD COLUMN asistio INTEGER`);
+  }
+}
+
+/**
+ * Pago de la seña con MercadoPago (Servicio 1, ladrillo 5). Reemplaza el
+ * comprobante+IA por Checkout Pro. Mientras el pago está 'pendiente', el turno
+ * sigue 'reservado' (ocupa el horario) hasta hold_expira; si no se paga a tiempo
+ * pasa a 'expirado' (libera el horario). Al aprobarse el pago (vía webhook) el
+ * turno queda confirmado y pago_estado='pagado'.
+ * - pago_estado: sin_pago | pendiente | pagado | expirado
+ * - hold_expira: epoch ms hasta el que se reserva el horario esperando el pago
+ */
+function migrarColumnasPago(database: Database.Database): void {
+  const columnas = database
+    .prepare(`PRAGMA table_info(turnos)`)
+    .all() as { name: string }[];
+  const tiene = (n: string) => columnas.some((c) => c.name === n);
+  if (!tiene("pago_estado")) {
+    database.exec(`ALTER TABLE turnos ADD COLUMN pago_estado TEXT NOT NULL DEFAULT 'sin_pago'`);
+  }
+  if (!tiene("pago_pref_id")) {
+    database.exec(`ALTER TABLE turnos ADD COLUMN pago_pref_id TEXT`);
+  }
+  if (!tiene("pago_init_point")) {
+    database.exec(`ALTER TABLE turnos ADD COLUMN pago_init_point TEXT`);
+  }
+  if (!tiene("hold_expira")) {
+    database.exec(`ALTER TABLE turnos ADD COLUMN hold_expira INTEGER`);
   }
 }

@@ -5,6 +5,7 @@ import { negocio } from "@/config/negocio";
 import { aMinutos, aTexto, fechaClave, slotsMinDeBarbero } from "@/lib/disponibilidad";
 import { obtenerServicio } from "@/lib/servicios";
 import { listarBarberos, obtenerBarbero, barberosParaServicio } from "@/lib/barberos";
+import { montoSena } from "@/lib/sena";
 import type { Barbero, Servicio } from "@/lib/tipos";
 
 // ============================================================================
@@ -87,6 +88,7 @@ export function horariosDisponibles(
   const fecha = new Date(fechaIso);
   const fechaKey = fechaClave(fecha);
   const nowMin = minutosAhoraSi(fecha);
+  expirarVencidosPorPago(); // libera horarios de pagos que vencieron
   const ocupados = ocupadosDelDia(negocio.slug, fechaKey);
   const candidatos = barberosCandidatos(barberoId, servicio.id);
 
@@ -112,15 +114,28 @@ export interface DatosReserva {
 }
 
 export type ResultadoReserva =
-  | { ok: true; barberoId: string; barberoNombre: string; token: string }
+  | {
+      ok: true;
+      id: number;
+      barberoId: string;
+      barberoNombre: string;
+      token: string;
+      // Presente solo si el turno requiere seña por MercadoPago (pago pendiente).
+      sena?: { montoArs: number; expiraEnMs: number };
+    }
   | { ok: false; error: "datos" | "servicio" | "tomado" };
+
+export interface OpcionesReserva {
+  conSena?: boolean; // cobrar seña por MercadoPago
+  holdMinutos?: number; // minutos que se reserva el horario esperando el pago
+}
 
 /**
  * Alta de turno con control de doble-reserva. Todo dentro de una transacción:
  * re-chequea disponibilidad y recién ahí inserta. Si el horario se ocupó mientras
  * el cliente completaba, devuelve error "tomado".
  */
-export function reservarTurno(datos: DatosReserva): ResultadoReserva {
+export function reservarTurno(datos: DatosReserva, opts: OpcionesReserva = {}): ResultadoReserva {
   const nombre = datos.nombre.trim();
   const telefono = datos.telefono.trim();
   if (nombre.length < 2 || telefono.length < 6) return { ok: false, error: "datos" };
@@ -135,6 +150,8 @@ export function reservarTurno(datos: DatosReserva): ResultadoReserva {
   const nowMin = minutosAhoraSi(fecha);
 
   const tx = db().transaction((): ResultadoReserva => {
+    // Libera holds de pago vencidos antes de calcular disponibilidad.
+    expirarVencidosPorPago();
     const ocupados = ocupadosDelDia(negocio.slug, fechaKey);
 
     // Elegir barbero: el pedido, o el primero libre si es "cualquiera".
@@ -147,15 +164,25 @@ export function reservarTurno(datos: DatosReserva): ResultadoReserva {
 
     const token = randomBytes(16).toString("hex"); // 128 bits, imposible de adivinar
 
-    // Confirmación por WhatsApp (ladrillo 3a): activada salvo CONFIRMACION_TURNO=false.
-    const requiereConfirmacion = process.env.CONFIRMACION_TURNO !== "false" ? 1 : 0;
+    // Seña por MercadoPago: si aplica y el monto es > 0, el turno queda "en espera
+    // de pago" (bloquea el horario hasta hold_expira). El pago ES la confirmación,
+    // así que el bot de WhatsApp NO interviene (requiere_confirmacion = 0).
+    const senaMonto = opts.conSena ? montoSena(servicio.precioArs) : 0;
+    const conSena = senaMonto > 0;
+    const holdExpira = conSena ? Date.now() + (opts.holdMinutos ?? 10) * 60_000 : null;
+    const pagoEstado = conSena ? "pendiente" : "sin_pago";
 
-    db()
+    // Confirmación por WhatsApp (ladrillo 3a): activada salvo CONFIRMACION_TURNO=false.
+    // Con seña, la confirmación la da el pago, no el WhatsApp.
+    const requiereConfirmacion = conSena ? 0 : process.env.CONFIRMACION_TURNO !== "false" ? 1 : 0;
+
+    const info = db()
       .prepare(
         `INSERT INTO turnos
            (negocio_slug, servicio_id, barbero_id, fecha, inicio_min, fin_min,
-            cliente_nombre, cliente_telefono, token, requiere_confirmacion, confirmado)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+            cliente_nombre, cliente_telefono, token, requiere_confirmacion, confirmado,
+            pago_estado, hold_expira)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
       )
       .run(
         negocio.slug,
@@ -168,9 +195,20 @@ export function reservarTurno(datos: DatosReserva): ResultadoReserva {
         telefono,
         token,
         requiereConfirmacion,
+        pagoEstado,
+        holdExpira,
       );
 
-    return { ok: true, barberoId: elegido.id, barberoNombre: elegido.nombre, token };
+    const id = Number(info.lastInsertRowid);
+    const res: ResultadoReserva = {
+      ok: true,
+      id,
+      barberoId: elegido.id,
+      barberoNombre: elegido.nombre,
+      token,
+    };
+    if (conSena && holdExpira) res.sena = { montoArs: senaMonto, expiraEnMs: holdExpira };
+    return res;
   });
 
   return tx();
@@ -619,6 +657,127 @@ export function expirarTurno(id: number): boolean {
     )
     .run(id, negocio.slug);
   return info.changes > 0;
+}
+
+// ============================================================================
+// Seña con MercadoPago (Servicio 1, ladrillo 5). El pago se cobra en la web al
+// reservar; el webhook confirma el turno. Ver lib/mp.ts para el diálogo con MP.
+// ============================================================================
+
+/** Marca como 'expirado' los turnos cuyo hold de pago venció sin pagarse (libera el horario). */
+export function expirarVencidosPorPago(): void {
+  db()
+    .prepare(
+      `UPDATE turnos SET estado = 'expirado', pago_estado = 'expirado'
+       WHERE negocio_slug = ? AND estado = 'reservado' AND confirmado = 0
+         AND pago_estado = 'pendiente' AND hold_expira IS NOT NULL AND hold_expira < ?`,
+    )
+    .run(negocio.slug, Date.now());
+}
+
+/** Guarda en el turno la preferencia de MP creada (id + link de checkout). */
+export function guardarPreferenciaPago(id: number, prefId: string, initPoint: string): void {
+  db()
+    .prepare(
+      `UPDATE turnos SET pago_pref_id = ?, pago_init_point = ?
+       WHERE id = ? AND negocio_slug = ?`,
+    )
+    .run(prefId, initPoint, id, negocio.slug);
+}
+
+export type EstadoPagoValor = "pendiente" | "pagado" | "expirado" | "sin_pago";
+
+export interface EstadoPago {
+  encontrado: boolean;
+  estado: EstadoPagoValor;
+  initPoint: string | null; // link del checkout de MP (mientras está pendiente)
+  montoArs: number;
+  expiraEnMs: number | null; // fin del hold (para el contador)
+  turno?: {
+    servicioNombre: string;
+    barberoNombre: string;
+    fechaIso: string;
+    hora: string;
+    token: string;
+  };
+}
+
+/** Estado del pago de un turno por su token (para la pantalla de checkout con contador). */
+export function estadoPagoPorToken(token: string): EstadoPago {
+  expirarVencidosPorPago();
+  const f = db()
+    .prepare(
+      `SELECT id, servicio_id, barbero_id, fecha, inicio_min, token,
+              pago_estado, pago_init_point, hold_expira, sena_monto
+       FROM turnos WHERE token = ? AND negocio_slug = ?`,
+    )
+    .get(token, negocio.slug) as
+    | {
+        id: number;
+        servicio_id: string;
+        barbero_id: string;
+        fecha: string;
+        inicio_min: number;
+        token: string;
+        pago_estado: string;
+        pago_init_point: string | null;
+        hold_expira: number | null;
+        sena_monto: number;
+      }
+    | undefined;
+
+  if (!f) {
+    return { encontrado: false, estado: "sin_pago", initPoint: null, montoArs: 0, expiraEnMs: null };
+  }
+
+  const servicio = servicioPorId(f.servicio_id);
+  const inicio = fechaHoraTurno(f.fecha, f.inicio_min);
+  const montoArs = f.sena_monto > 0 ? f.sena_monto : montoSena(servicio?.precioArs ?? 0);
+
+  return {
+    encontrado: true,
+    estado: (f.pago_estado as EstadoPagoValor) ?? "sin_pago",
+    initPoint: f.pago_init_point ?? null,
+    montoArs,
+    expiraEnMs: f.hold_expira ?? null,
+    turno: {
+      servicioNombre: servicio?.nombre ?? f.servicio_id,
+      barberoNombre: obtenerBarbero(f.barbero_id)?.nombre ?? f.barbero_id,
+      fechaIso: inicio.toISOString(),
+      hora: aTexto(f.inicio_min),
+      token: f.token,
+    },
+  };
+}
+
+/**
+ * Aprueba el pago de la seña (lo llama el webhook de MP tras verificar el pago).
+ * Confirma el turno y registra la seña. Idempotente: si ya estaba pagado, no hace
+ * nada (devuelve ok:false), así los reintentos del webhook no duplican.
+ */
+export function aprobarPagoPorToken(
+  token: string,
+  montoPagado: number,
+): { ok: boolean; turnoId: number | null } {
+  const tx = db().transaction((): { ok: boolean; turnoId: number | null } => {
+    const f = db()
+      .prepare(
+        `SELECT id FROM turnos
+         WHERE token = ? AND negocio_slug = ? AND estado = 'reservado'
+           AND pago_estado = 'pendiente' AND confirmado = 0`,
+      )
+      .get(token, negocio.slug) as { id: number } | undefined;
+    if (!f) return { ok: false, turnoId: null };
+
+    db()
+      .prepare(
+        `UPDATE turnos SET confirmado = 1, pago_estado = 'pagado', sena_monto = ?, hold_expira = NULL
+         WHERE id = ? AND negocio_slug = ?`,
+      )
+      .run(Math.max(0, Math.round(montoPagado)), f.id, negocio.slug);
+    return { ok: true, turnoId: f.id };
+  });
+  return tx();
 }
 
 // ============================================================================
