@@ -76,13 +76,25 @@ function construirDias(): DiaOpcion[] {
   return dias;
 }
 
-export default function Panel({ sesionInicial }: { sesionInicial: SesionPanel | null }) {
+export default function Panel({
+  sesionInicial,
+  metricasAvanzadas = false,
+}: {
+  sesionInicial: SesionPanel | null;
+  metricasAvanzadas?: boolean;
+}) {
   const [sesion, setSesion] = useState<SesionPanel | null>(sesionInicial);
 
   if (!sesion) {
     return <Login onOk={setSesion} />;
   }
-  return <PanelPrivado sesion={sesion} onSalir={() => setSesion(null)} />;
+  return (
+    <PanelPrivado
+      sesion={sesion}
+      onSalir={() => setSesion(null)}
+      metricasAvanzadas={metricasAvanzadas}
+    />
+  );
 }
 
 // ── Pantalla de ingreso ──────────────────────────────────────────────────────
@@ -140,7 +152,15 @@ function Login({ onOk }: { onOk: (s: SesionPanel) => void }) {
 }
 
 // ── Contenedor autenticado: cabecera + navegación (dueño) ────────────────────
-function PanelPrivado({ sesion, onSalir }: { sesion: SesionPanel; onSalir: () => void }) {
+function PanelPrivado({
+  sesion,
+  onSalir,
+  metricasAvanzadas,
+}: {
+  sesion: SesionPanel;
+  onSalir: () => void;
+  metricasAvanzadas: boolean;
+}) {
   const esDueno = sesion.tipo === "dueno";
   const [vista, setVista] = useState<Vista>("agenda");
 
@@ -198,7 +218,7 @@ function PanelPrivado({ sesion, onSalir }: { sesion: SesionPanel; onSalir: () =>
       {!esDueno || vista === "agenda" ? (
         <Agenda esBarbero={sesion.tipo === "barbero"} />
       ) : vista === "metricas" ? (
-        <GestionMetricas />
+        <GestionMetricas avanzado={metricasAvanzadas} />
       ) : vista === "servicios" ? (
         <GestionServicios />
       ) : vista === "barberos" ? (
@@ -409,68 +429,103 @@ function Metrica({ etiqueta, valor }: { etiqueta: string; valor: string }) {
 // ── Métricas del negocio (solo dueño) ────────────────────────────────────────
 type PeriodoMetrica = "hoy" | "semana" | "mes";
 
-/** Rango de días (claves YYYY-MM-DD) del período elegido, en hora local. */
-function rangoDePeriodo(periodo: PeriodoMetrica): { desde: string; hasta: string } {
-  const hoy = new Date();
-  hoy.setHours(0, 0, 0, 0);
+function hoy0(): Date {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+function keyToDate(k: string): Date {
+  const [y, m, d] = k.split("-").map(Number);
+  return new Date(y, m - 1, d);
+}
+
+/** Rango de días (claves YYYY-MM-DD) del período que contiene a la fecha ancla. */
+function rangoDePeriodoEn(periodo: PeriodoMetrica, ancla: Date): { desde: string; hasta: string } {
+  const base = new Date(ancla);
+  base.setHours(0, 0, 0, 0);
 
   if (periodo === "hoy") {
-    const k = keyDe(hoy);
+    const k = keyDe(base);
     return { desde: k, hasta: k };
   }
   if (periodo === "semana") {
-    const desdeLunes = (hoy.getDay() + 6) % 7; // 0=dom..6=sáb -> días desde el lunes
-    const lunes = new Date(hoy);
-    lunes.setDate(hoy.getDate() - desdeLunes);
+    const desdeLunes = (base.getDay() + 6) % 7; // 0=dom..6=sáb -> días desde el lunes
+    const lunes = new Date(base);
+    lunes.setDate(base.getDate() - desdeLunes);
     const domingo = new Date(lunes);
     domingo.setDate(lunes.getDate() + 6);
     return { desde: keyDe(lunes), hasta: keyDe(domingo) };
   }
-  // mes calendario actual
-  const primero = new Date(hoy.getFullYear(), hoy.getMonth(), 1);
-  const ultimo = new Date(hoy.getFullYear(), hoy.getMonth() + 1, 0);
+  // mes calendario de la ancla
+  const primero = new Date(base.getFullYear(), base.getMonth(), 1);
+  const ultimo = new Date(base.getFullYear(), base.getMonth() + 1, 0);
   return { desde: keyDe(primero), hasta: keyDe(ultimo) };
 }
 
-/** Rango del período equivalente anterior (ayer / semana pasada / mes pasado). */
-function rangoAnteriorDePeriodo(periodo: PeriodoMetrica): { desde: string; hasta: string } {
-  const hoy = new Date();
-  hoy.setHours(0, 0, 0, 0);
+/** Mueve la fecha ancla un período hacia atrás (-1) o adelante (+1). */
+function moverAncla(ancla: Date, periodo: PeriodoMetrica, dir: 1 | -1): Date {
+  const d = new Date(ancla);
+  d.setHours(0, 0, 0, 0);
+  if (periodo === "hoy") d.setDate(d.getDate() + dir);
+  else if (periodo === "semana") d.setDate(d.getDate() + dir * 7);
+  else d.setMonth(d.getMonth() + dir);
+  return d;
+}
 
+/** Rango del período equivalente anterior (día/semana/mes previo a la ancla). */
+function rangoAnteriorEn(periodo: PeriodoMetrica, ancla: Date): { desde: string; hasta: string } {
+  return rangoDePeriodoEn(periodo, moverAncla(ancla, periodo, -1));
+}
+
+function cap(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+/** Etiqueta legible del período anclado (ej: "Vie 25 dic 2026", "1 – 7 ago", "Agosto de 2026"). */
+function etiquetaPeriodo(periodo: PeriodoMetrica, ancla: Date): string {
+  const limpiar = (s: string) => s.replace(/\./g, "");
   if (periodo === "hoy") {
-    const ayer = new Date(hoy);
-    ayer.setDate(hoy.getDate() - 1);
-    const k = keyDe(ayer);
-    return { desde: k, hasta: k };
+    return cap(
+      limpiar(
+        ancla.toLocaleDateString("es-AR", {
+          weekday: "short",
+          day: "numeric",
+          month: "short",
+          year: "numeric",
+        }),
+      ),
+    );
   }
   if (periodo === "semana") {
-    const desdeLunes = (hoy.getDay() + 6) % 7;
-    const lunesPasado = new Date(hoy);
-    lunesPasado.setDate(hoy.getDate() - desdeLunes - 7);
-    const domingoPasado = new Date(lunesPasado);
-    domingoPasado.setDate(lunesPasado.getDate() + 6);
-    return { desde: keyDe(lunesPasado), hasta: keyDe(domingoPasado) };
+    const { desde, hasta } = rangoDePeriodoEn("semana", ancla);
+    const l = keyToDate(desde);
+    const d = keyToDate(hasta);
+    const fmt = (x: Date) => limpiar(x.toLocaleDateString("es-AR", { day: "numeric", month: "short" }));
+    return `${fmt(l)} – ${fmt(d)}`;
   }
-  // mes calendario anterior
-  const primero = new Date(hoy.getFullYear(), hoy.getMonth() - 1, 1);
-  const ultimo = new Date(hoy.getFullYear(), hoy.getMonth(), 0);
-  return { desde: keyDe(primero), hasta: keyDe(ultimo) };
+  return cap(ancla.toLocaleDateString("es-AR", { month: "long", year: "numeric" }));
 }
 
 /** Etiqueta corta del período anterior, para el chip de comparación. */
 const ETIQUETA_ANTERIOR: Record<PeriodoMetrica, string> = {
-  hoy: "ayer",
-  semana: "sem. pasada",
-  mes: "mes pasado",
+  hoy: "período previo",
+  semana: "sem. previa",
+  mes: "mes previo",
 };
 
-function GestionMetricas() {
+function GestionMetricas({ avanzado }: { avanzado: boolean }) {
   const [periodo, setPeriodo] = useState<PeriodoMetrica>("hoy");
+  const [ancla, setAncla] = useState<Date>(hoy0());
   const [datos, setDatos] = useState<Metricas | null>(null);
   const [cargando, setCargando] = useState(true);
 
-  const rango = rangoDePeriodo(periodo);
-  const rangoPrev = rangoAnteriorDePeriodo(periodo);
+  // En Presencia (no avanzado) el período es siempre relativo a hoy.
+  const anclaEfectiva = avanzado ? ancla : hoy0();
+  const rango = rangoDePeriodoEn(periodo, anclaEfectiva);
+  const rangoPrev = rangoAnteriorEn(periodo, anclaEfectiva);
+  const hoyKey = keyDe(hoy0());
+  const sigDeshabilitado = rango.hasta >= hoyKey; // no navegar a futuro
 
   useEffect(() => {
     let vivo = true;
@@ -488,10 +543,12 @@ function GestionMetricas() {
   }, [rango.desde, rango.hasta, rangoPrev.desde, rangoPrev.hasta]);
 
   const opciones: { p: PeriodoMetrica; label: string }[] = [
-    { p: "hoy", label: "Hoy" },
+    { p: "hoy", label: avanzado ? "Día" : "Hoy" },
     { p: "semana", label: "Semana" },
     { p: "mes", label: "Mes" },
   ];
+
+  const esHoy = keyDe(anclaEfectiva) === hoyKey;
 
   return (
     <div className="mt-6">
@@ -512,6 +569,47 @@ function GestionMetricas() {
           );
         })}
       </div>
+
+      {/* Navegación por fecha (solo planes Automatización/Crecimiento). */}
+      {avanzado && (
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          <button
+            onClick={() => setAncla((a) => moverAncla(a, periodo, -1))}
+            className="rounded-full border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-600 hover:border-zinc-400"
+            aria-label="Período anterior"
+          >
+            ◀
+          </button>
+          <span className="min-w-[9rem] flex-1 text-center text-sm font-semibold">
+            {etiquetaPeriodo(periodo, anclaEfectiva)}
+          </span>
+          <button
+            onClick={() => setAncla((a) => moverAncla(a, periodo, 1))}
+            disabled={sigDeshabilitado}
+            className="rounded-full border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-600 hover:border-zinc-400 disabled:opacity-30"
+            aria-label="Período siguiente"
+          >
+            ▶
+          </button>
+          <input
+            type="date"
+            value={keyDe(anclaEfectiva)}
+            max={hoyKey}
+            onChange={(e) => {
+              if (e.target.value) setAncla(keyToDate(e.target.value));
+            }}
+            className="rounded-lg border border-zinc-300 px-2 py-1.5 text-sm text-zinc-700 outline-none focus:border-zinc-500"
+          />
+          {!esHoy && (
+            <button
+              onClick={() => setAncla(hoy0())}
+              className="text-sm font-medium text-zinc-500 underline-offset-2 hover:text-zinc-800 hover:underline"
+            >
+              Hoy
+            </button>
+          )}
+        </div>
+      )}
 
       {cargando || !datos ? (
         <p className="py-10 text-center text-zinc-400">Cargando métricas…</p>
